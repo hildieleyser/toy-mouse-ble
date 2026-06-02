@@ -1903,7 +1903,7 @@ class App:
         self.cat_status.set("listing clips...")
         def worker():
             try:
-                specs = C.list_b2_clips() + C.list_local_clips()
+                specs = C.list_bundled_clips() + C.list_b2_clips() + C.list_local_clips()
             except Exception as e:
                 self.root.after(0, lambda err=e: self.cat_status.set(f"refresh failed: {err}"))
                 return
@@ -2063,7 +2063,7 @@ class App:
             return False
         if not want_video:
             return True
-        return all((C.CLIP_DIR / f"{spec.stem}_cam{c}.mp4").exists() for c in cams)
+        return all(C.clip_mp4_path(spec, c).exists() for c in cams)
 
     def _choreo_autoassign(self, slugs) -> int:
         """Randomly assign a catalog clip to each mouse: distinct clips first,

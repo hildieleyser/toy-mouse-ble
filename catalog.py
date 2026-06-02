@@ -86,6 +86,10 @@ CLIP_DIR = CACHE_DIR / "clips"
 LOCAL_DATA_DIR = Path(
     r"C:\Users\labra\Projects\VirtualMouseCageUnity\virtual-mouse-cage\data\cat_40_vids"
 )
+# Preloaded clips shipped in the repo (transcoded mp4 + CSV per clip), so a
+# Raspberry Pi can play them with no Backblaze/rclone access. See clips/README.md
+# and build_bundled_clips.py.
+BUNDLED_DIR = Path(__file__).resolve().parent / "clips"
 
 
 @dataclass
@@ -125,9 +129,43 @@ def _ts(g: dict) -> datetime:
     return datetime(int(g["y"]), int(g["m"]), int(g["d"]),
                     int(g["H"]), int(g["M"]), int(g["S"]))
 
+def list_bundled_clips() -> list[ClipSpec]:
+    """Clips preloaded in the repo (clips/<stem>/ with clip.json + camN.mp4 +
+    multicam_3d_results.csv). No network/rclone needed — this is what the Pi uses."""
+    import json
+    out = []
+    if not BUNDLED_DIR.exists():
+        return out
+    for d in sorted(BUNDLED_DIR.iterdir()):
+        manifest = d / "clip.json"
+        if not d.is_dir() or not manifest.exists():
+            continue
+        try:
+            m = json.loads(manifest.read_text())
+            csv = d / "multicam_3d_results.csv"
+            out.append(ClipSpec(
+                label=m.get("label", f"[bundled] {d.name}"),
+                cage=m["cage"], start=datetime.fromisoformat(m["start"]),
+                source="bundled", csv_local=csv if csv.exists() else None,
+                side=m.get("side", "")))
+        except Exception:
+            continue
+    return out
+
+def clip_mp4_path(spec: ClipSpec, cam: int) -> Path:
+    """Where a clip's per-camera mp4 lives: the repo's bundled dir for preloaded
+    clips, otherwise the galaxy-rvr extraction cache."""
+    if spec.source == "bundled":
+        return BUNDLED_DIR / spec.stem / f"cam{cam}.mp4"
+    return CLIP_DIR / f"{spec.stem}_cam{cam}.mp4"
+
 def list_b2_clips() -> list[ClipSpec]:
     out = []
-    for name in b2_lsf(DATA_PREFIX, include="*.csv"):
+    try:
+        names = b2_lsf(DATA_PREFIX, include="*.csv")
+    except Exception:
+        return out          # no rclone (e.g. on the Pi) -> just no B2 clips
+    for name in names:
         m = _B2_NAME_RE.match(name)
         if not m:
             continue
@@ -232,6 +270,10 @@ def resolve_tar_remote(cage: str, ts: datetime) -> str | None:
     return None
 
 def plan_clip(spec: ClipSpec, cams: tuple[int, ...]) -> dict:
+    if spec.source == "bundled":
+        missing = [c for c in cams if not clip_mp4_path(spec, c).exists()]
+        return {"csv_missing": False, "missing_tars": 0, "total_tars": 0,
+                "missing_mp4s": missing, "total_mp4s": len(cams), "eta_s": 0}
     csv_missing = not (
         (spec.csv_local and spec.csv_local.exists())
         or (CSV_DIR / spec.csv_remote.rsplit("/", 1)[-1]).exists())
@@ -253,6 +295,10 @@ def extract_clip_mp4s(spec: ClipSpec, cams: tuple[int, ...],
     def _status(msg):
         if status_cb:
             status_cb(msg)
+    if spec.source == "bundled":
+        # already on disk in the repo — nothing to download or transcode.
+        out = {c: clip_mp4_path(spec, c) for c in cams if clip_mp4_path(spec, c).exists()}
+        return spec.csv_local, out
     # 1) CSV
     if spec.csv_local and spec.csv_local.exists():
         csv_local = spec.csv_local
@@ -366,6 +412,8 @@ class RollingFetcher:
 
     def _gc_minute(self, i: int):
         m = self.minutes[i]
+        if m.spec.source == "bundled":
+            return                      # never delete repo-shipped clips
         for cam, mp4 in list(m.cam_mp4s.items()):
             try:
                 Path(mp4).unlink(missing_ok=True)

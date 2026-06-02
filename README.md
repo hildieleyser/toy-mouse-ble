@@ -97,6 +97,17 @@ The **Clip catalog** card pulls the same data as `galaxy_rvr_panel.py`:
 The catalog CSVs feed the same cage-fit + speed-matching pipeline below, so a
 real recorded mouse trajectory can be replayed straight onto the toy.
 
+### Preloaded (offline) clips — no Backblaze needed
+
+The repo ships 5 ready-to-play clips (all 12 cameras) under `clips/`, so a
+Raspberry Pi with no B2/rclone access can still load and play them. They appear
+first in the catalog refresh labelled `[bundled] …`; selecting one needs no
+download (CSV + per-camera mp4s are already on disk). The video is transcoded to
+720×320 — small enough for the Pi 5 to software-decode (it has no hardware H.264
+decoder) and to fit a normal git repo. To drive a mouse only the bundled
+trajectory CSV is used, so motion is identical to the full-res source. See
+`clips/README.md`; regenerate with `python build_bundled_clips.py`.
+
 ## Per-mouse choreography (a different clip per mouse)
 
 The **Per-mouse choreography** card runs 4–6 mice, each following its **own**
