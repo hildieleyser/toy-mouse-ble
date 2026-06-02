@@ -1,0 +1,12 @@
+# Android bug-report / device dumps (large, not source)
+dumpstate.txt
+*.dumpstate
+bugreport*.zip
+
+# BLE / HCI capture logs
+btsnoop_hci.log
+*.log
+
+# Python
+__pycache__/
+*.py[cod]

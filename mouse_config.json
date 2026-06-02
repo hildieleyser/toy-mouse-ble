@@ -1,0 +1,70 @@
+{
+  "mouse_mac": "98:3A:F2:CA:5C:5C",
+  "mice": [
+    {
+      "number": 1,
+      "slug": "mouse1",
+      "mac": "8E:0C:A4:98:D7:94",
+      "faulty": false
+    },
+    {
+      "number": 2,
+      "slug": "mouse2",
+      "mac": "98:3A:F2:CA:5C:5C",
+      "faulty": false
+    },
+    {
+      "number": 3,
+      "slug": "mouse3",
+      "mac": "90:DD:61:6F:5F:FB",
+      "faulty": true
+    },
+    {
+      "number": 4,
+      "slug": "mouse4",
+      "mac": "74:93:6A:5B:AF:C7",
+      "faulty": false
+    },
+    {
+      "number": 5,
+      "slug": "mouse5",
+      "mac": "99:E6:D1:FA:F9:9B",
+      "faulty": false
+    },
+    {
+      "number": 6,
+      "slug": "mouse6",
+      "mac": null,
+      "faulty": false
+    }
+  ],
+  "cat_csv": "[B2]      2026-03-11 08:26:00  cage 6.01.001",
+  "stream_minutes": 5,
+  "cage_w": 1.0,
+  "cage_h": 1.0,
+  "cage_margin": 0.1,
+  "bodypart": "Tailbase",
+  "src_fps": 30.0,
+  "tap_cal_m": 2.0,
+  "tap_cal_s": 1.5,
+  "tap_turn_rate": 1440.0,
+  "tap_on_ms": 200,
+  "tap_turn_on_ms": 40,
+  "tap_gap_ms": 150,
+  "tap_tol": 0.04,
+  "tap_min_turn": 10.0,
+  "manual_tap_mode": true,
+  "manual_tap_s": 0.1,
+  "tap_sequence": "forward, left, forward, right, forward, right, forward, left, forward x2, right, forward, left, forward, forward",
+  "tap_seq_fwd_s": 0.2,
+  "tap_seq_turn_s": 0.02,
+  "tap_seq_gap_s": 1.0,
+  "cat_cams": [
+    1,
+    8,
+    9,
+    10,
+    11,
+    12
+  ]
+}
