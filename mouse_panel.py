@@ -818,121 +818,327 @@ class Choreographer:
 # ---- Bento view (one video+trajectory tile per mouse) ----------------------
 
 class BentoView(tk.Toplevel):
-    """A grid (bento) of per-mouse tiles. Each tile plays its clip's camera
-    video with the mouse's cage trajectory + dead-reckoned pose drawn on top.
-    A single camera toggle (1/4/9) switches the angle shown in every tile."""
-    CAMS = (1, 4, 9)
-    TILE_W, TILE_H = 360, 240
+    """Per-mouse video + trajectory window with two layouts:
+
+    * "Show view" (default) — one row per rover: its cage trajectory beside one
+      or more camera tiles, each with its own angle dropdown and add/remove, so
+      you can curate exactly which cameras are on screen. Resizable + F11
+      fullscreen with embedded transport, for driving a single HDMI screen.
+    * "Overlay grid" — the original compact bento: one tile per rover with the
+      trajectory drawn on top of a single shared camera angle.
+
+    Each camera tile is one decode; trajectory tiles are free (vector draws)."""
+    DEFAULT_CAMS = (1, 4, 9)             # preferred angle order for new cam tiles
+    GRID_TILE_W, GRID_TILE_H = 360, 240
+    MAX_DECODES_WARN = 6                 # software-decode budget on the Pi 5
 
     def __init__(self, app):
         super().__init__(app.root)
         self.app = app
-        self.title("Per-mouse bento — video + trajectory")
-        self.configure(background="#1d1d28")
-        self.cam_var = tk.IntVar(value=self.CAMS[0])
-        bar = ttk.Frame(self); bar.pack(fill="x", padx=6, pady=4)
-        ttk.Label(bar, text="Camera angle:").pack(side="left")
-        for cam in self.CAMS:
-            ttk.Radiobutton(bar, text=f"cam {cam}", value=cam, variable=self.cam_var,
-                            command=self._on_cam_change).pack(side="left", padx=2)
-        self.note = ttk.Label(bar, text="", foreground="#888")
-        self.note.pack(side="left", padx=12)
-        self.grid_f = ttk.Frame(self)
-        self.grid_f.pack(fill="both", expand=True, padx=6, pady=4)
-        self.tiles: dict[str, dict] = {}     # slug -> {canvas, video, title}
+        self.title("Per-mouse view — trajectory + cameras")
+        self.configure(background="#11111a")
+        self.mode = "show"               # "show" | "grid"
+        self._fullscreen = False
+        self._cfg_after: str | None = None
+        self.rows: dict[str, dict] = {}      # show mode: slug -> row dict
+        self.tiles: dict[str, dict] = {}     # grid mode: slug -> tile dict
+        self.grid_cam_var = tk.IntVar(value=self.DEFAULT_CAMS[0])
+        self._build_toolbar()
+        self.body = ttk.Frame(self)
+        self.body.pack(fill="both", expand=True, padx=4, pady=4)
         self.protocol("WM_DELETE_WINDOW", self.close)
+        self.bind("<F11>", lambda e: self.toggle_fullscreen())
+        self.bind("<Escape>", lambda e: self.exit_fullscreen())
+        self.bind("<Configure>", self._on_configure)
+        # keyboard transport so the view stays controllable in fullscreen
+        self.bind("<space>", lambda e: self._toggle_play())
+        self.bind("<Key-r>", lambda e: self.app.on_choreo_reset())
         self.rebuild()
 
+    # ---- toolbar / transport ----
+    def _build_toolbar(self):
+        self.bar = ttk.Frame(self); self.bar.pack(fill="x", padx=6, pady=4)
+        self.play_btn = ttk.Button(self.bar, text="▶ Play", width=8,
+                                   command=self._toggle_play)
+        self.play_btn.pack(side="left", padx=2)
+        ttk.Button(self.bar, text="⟲ Reset", width=7,
+                   command=self.app.on_choreo_reset).pack(side="left", padx=2)
+        ttk.Separator(self.bar, orient="vertical").pack(side="left", fill="y", padx=8)
+        self.mode_var = tk.StringVar(value=self.mode)
+        ttk.Radiobutton(self.bar, text="Show view", value="show",
+                        variable=self.mode_var, command=self._on_mode).pack(side="left")
+        ttk.Radiobutton(self.bar, text="Overlay grid", value="grid",
+                        variable=self.mode_var, command=self._on_mode).pack(side="left")
+        # grid-mode global camera angle (only shown in grid mode)
+        self.grid_cam_bar = ttk.Frame(self.bar)
+        ttk.Label(self.grid_cam_bar, text="  angle:").pack(side="left")
+        for cam in self.DEFAULT_CAMS:
+            ttk.Radiobutton(self.grid_cam_bar, text=str(cam), value=cam,
+                            variable=self.grid_cam_var,
+                            command=self.tick).pack(side="left")
+        ttk.Separator(self.bar, orient="vertical").pack(side="left", fill="y", padx=8)
+        ttk.Button(self.bar, text="⛶ Fullscreen (F11)",
+                   command=self.toggle_fullscreen).pack(side="left", padx=2)
+        self.note = ttk.Label(self.bar, text="", foreground="#aaa")
+        self.note.pack(side="left", padx=12)
+
+    def _toggle_play(self):
+        ch = self.app.choreographer
+        ch.pause() if ch.after_id is not None else ch.play()
+        self._refresh_play_btn()
+
+    def _refresh_play_btn(self):
+        playing = self.app.choreographer.after_id is not None
+        self.play_btn.config(text="⏸ Pause" if playing else "▶ Play")
+
+    def toggle_fullscreen(self):
+        self._fullscreen = not self._fullscreen
+        self.attributes("-fullscreen", self._fullscreen)
+        if self._fullscreen:
+            self.bar.pack_forget()           # clean presentation screen
+        else:
+            self.bar.pack(fill="x", padx=6, pady=4, before=self.body)
+
+    def exit_fullscreen(self):
+        if self._fullscreen:
+            self.toggle_fullscreen()
+
+    def _on_mode(self):
+        self.mode = self.mode_var.get()
+        self.rebuild()
+
+    def _on_configure(self, _e):
+        # repaint after a resize settles, so tiles refill when paused too
+        if self._cfg_after is not None:
+            self.after_cancel(self._cfg_after)
+        self._cfg_after = self.after(120, self.tick)
+
     def close(self):
-        for t in self.tiles.values():
-            t["video"].release()
+        self._release_videos()
         self.app.bento = None
         self.destroy()
 
-    def _on_cam_change(self):
-        self.tick()   # repaint every tile at the new angle immediately
-
-    def rebuild(self):
-        """(Re)build one tile per current track. Call after Prepare."""
-        for child in self.grid_f.winfo_children():
-            child.destroy()
+    def _release_videos(self):
+        for r in self.rows.values():
+            for c in r["cams"]:
+                c["video"].release()
         for t in self.tiles.values():
             t["video"].release()
-        self.tiles = {}
+
+    # ---- (re)build ----
+    def rebuild(self):
+        """(Re)build the layout for the current tracks. Call after Prepare."""
+        for child in self.body.winfo_children():
+            child.destroy()
+        self._release_videos()
+        self.rows = {}; self.tiles = {}
+        # grid-mode global angle picker: only relevant in overlay-grid mode
+        self.grid_cam_bar.pack_forget()
+        if self.mode == "grid":
+            self.grid_cam_bar.pack(side="left")
         tracks = self.app.choreographer.tracks
         if not tracks:
-            ttk.Label(self.grid_f,
-                      text="No tracks yet — assign clips and press 'Prepare tracks'.",
-                      foreground="#aaa").pack(padx=20, pady=20)
+            ttk.Label(self.body, foreground="#aaa",
+                      text="No tracks yet — assign clips and press 'Prepare tracks'."
+                      ).pack(padx=20, pady=20)
             self.note.config(text="")
             return
+        if self.mode == "show":
+            self._build_show(tracks)
+        else:
+            self._build_grid(tracks)
+        self._update_note()
+        self.after(60, self.tick)            # first paint once geometry settles
+
+    def _build_show(self, tracks):
+        for i, (slug, tr) in enumerate(tracks.items()):
+            row = tk.Frame(self.body, background=tr.color,
+                           highlightbackground=tr.color, highlightthickness=2)
+            row.grid(row=i, column=0, sticky="nsew", padx=3, pady=3)
+            self.body.rowconfigure(i, weight=1)
+            self.body.columnconfigure(0, weight=1)
+            tk.Label(row, text=f"■\n{slug}", bg=tr.color, fg="white", width=8,
+                     font=("Segoe UI", 9, "bold")).grid(row=0, column=0, sticky="ns")
+            tcv = tk.Canvas(row, width=220, height=180, bg="#11111a",
+                            highlightthickness=0)
+            tcv.grid(row=0, column=1, sticky="nsew", padx=2, pady=2)
+            holder = tk.Frame(row, bg=tr.color)
+            holder.grid(row=0, column=2, sticky="nsew")
+            row.rowconfigure(0, weight=1)
+            row.columnconfigure(1, weight=1, minsize=160)   # trajectory
+            row.columnconfigure(2, weight=2)                # cameras
+            addb = tk.Button(row, text="＋\ncam", command=lambda s=slug: self._add_cam_tile(s),
+                             bg="#23232e", fg="white", relief="flat", width=4)
+            addb.grid(row=0, column=3, sticky="ns", padx=2)
+            avail = sorted(self.app.choreo_cam_mp4s.get(slug, {}).keys())
+            self.rows[slug] = {"frame": row, "traj": tcv, "holder": holder,
+                               "avail": avail, "cams": [], "addb": addb}
+            if avail:
+                self._add_cam_tile(slug, avail[0])
+            else:
+                tk.Label(holder, text="(no video for this clip)", bg=tr.color,
+                         fg="#eee").pack(padx=10, pady=10)
+                addb.config(state="disabled")
+
+    def _add_cam_tile(self, slug: str, cam: int | None = None):
+        r = self.rows.get(slug)
+        if not r or not r["avail"]:
+            return
+        avail = r["avail"]
+        if cam is None:
+            used = [c["var"].get() for c in r["cams"]]
+            cam = next((a for a in avail if a not in used), avail[0])
+        holder = r["holder"]
+        col = len(r["cams"])
+        cell = tk.Frame(holder, bg="#11111a")
+        cell.grid(row=0, column=col, sticky="nsew", padx=1, pady=1)
+        holder.columnconfigure(col, weight=1)
+        holder.rowconfigure(0, weight=1)
+        top = tk.Frame(cell, bg="#11111a"); top.pack(fill="x")
+        tk.Label(top, text="cam", bg="#11111a", fg="#aaa",
+                 font=("Segoe UI", 8)).pack(side="left")
+        var = tk.IntVar(value=cam)
+        om = tk.OptionMenu(top, var, *avail,
+                           command=lambda _v: self.tick())
+        om.config(bg="#23232e", fg="white", highlightthickness=0, bd=0,
+                  font=("Segoe UI", 8), width=3)
+        om["menu"].config(bg="#23232e", fg="white")
+        om.pack(side="left")
+        tk.Button(top, text="✕", bd=0, relief="flat", bg="#11111a", fg="#f88",
+                  font=("Segoe UI", 8),
+                  command=lambda c=cell: self._remove_cam_tile(slug, c)).pack(side="right")
+        cv = tk.Canvas(cell, width=160, height=120, bg="#11111a", highlightthickness=0)
+        cv.pack(fill="both", expand=True)
+        video = TileVideo(cv)
+        video.set_sources({c: str(p)
+                           for c, p in self.app.choreo_cam_mp4s.get(slug, {}).items()})
+        r["cams"].append({"cell": cell, "canvas": cv, "video": video, "var": var})
+        self._update_note()
+        self.tick()
+
+    def _remove_cam_tile(self, slug: str, cell):
+        r = self.rows.get(slug)
+        if not r:
+            return
+        keep = []
+        for c in r["cams"]:
+            if c["cell"] is cell:
+                c["video"].release(); c["cell"].destroy()
+            else:
+                keep.append(c)
+        for col, c in enumerate(keep):       # reflow columns
+            c["cell"].grid_configure(column=col)
+        r["cams"] = keep
+        self._update_note()
+
+    def _build_grid(self, tracks):
         cols = max(1, int(math.ceil(math.sqrt(len(tracks)))))
-        any_video = False
         for i, (slug, tr) in enumerate(tracks.items()):
             r, c = divmod(i, cols)
-            cell = tk.Frame(self.grid_f, background=tr.color,
+            cell = tk.Frame(self.body, background=tr.color,
                             highlightbackground=tr.color, highlightthickness=2)
             cell.grid(row=r, column=c, padx=4, pady=4, sticky="nsew")
+            self.body.rowconfigure(r, weight=1); self.body.columnconfigure(c, weight=1)
             title = tk.Label(cell, anchor="w", fg="white", background=tr.color,
                              font=("Segoe UI", 9, "bold"))
             title.pack(fill="x")
-            cv = tk.Canvas(cell, width=self.TILE_W, height=self.TILE_H,
+            cv = tk.Canvas(cell, width=self.GRID_TILE_W, height=self.GRID_TILE_H,
                            background="#11111a", highlightthickness=0)
-            cv.pack()
+            cv.pack(fill="both", expand=True)
             video = TileVideo(cv)
-            mp4s = self.app.choreo_cam_mp4s.get(slug, {})
-            if mp4s:
-                any_video = True
-                video.set_sources({cam: str(p) for cam, p in mp4s.items()})
+            video.set_sources({cam: str(p)
+                               for cam, p in self.app.choreo_cam_mp4s.get(slug, {}).items()})
             self.tiles[slug] = {"canvas": cv, "video": video, "title": title}
-        for c in range(cols):
-            self.grid_f.columnconfigure(c, weight=1)
-        if not any_video:
-            self.note.config(text="(no video extracted — tiles show trajectory only; "
-                                  "tick 'video tiles' before Prepare)")
-        else:
-            self.note.config(text="")
-        self.tick()
 
+    def _update_note(self):
+        total = sum(len(r["cams"]) for r in self.rows.values())
+        if self.mode != "show":
+            self.note.config(text="")
+            return
+        msg = f"{total} camera stream(s) → {total} decode(s)"
+        if total > self.MAX_DECODES_WARN:
+            msg += f"   ⚠ may drop frames past ~{self.MAX_DECODES_WARN} on the Pi"
+        self.note.config(text=msg)
+
+    # ---- per-frame repaint ----
     def tick(self):
-        """Repaint all tiles for the current frame + selected camera."""
-        cam = self.cam_var.get()
+        if not self.winfo_exists():           # a pending after() fired post-close
+            return
+        self._refresh_play_btn()
+        if self.mode == "show":
+            self._tick_show()
+        else:
+            self._tick_grid()
+
+    def _tick_show(self):
+        for slug, r in self.rows.items():
+            tr = self.app.choreographer.tracks.get(slug)
+            if tr is None:
+                continue
+            self._draw_traj(r["traj"], tr)
+            for c in r["cams"]:
+                cv = c["canvas"]
+                w = max(1, cv.winfo_width()); h = max(1, cv.winfo_height())
+                c["video"].show(c["var"].get(), tr.idx, w, h)
+
+    def _tick_grid(self):
+        cam = self.grid_cam_var.get()
         for slug, t in self.tiles.items():
             tr = self.app.choreographer.tracks.get(slug)
             if tr is None:
                 continue
             cv = t["canvas"]
-            painted = t["video"].show(cam, tr.idx, self.TILE_W, self.TILE_H)
+            w = max(1, cv.winfo_width()); h = max(1, cv.winfo_height())
+            painted = t["video"].show(cam, tr.idx, w, h)
             cam_txt = f"cam {cam}" if t["video"].has(cam) else "no video"
             t["title"].config(text=f"■ {slug}  ·  {tr.label}  ·  {cam_txt}  "
                                    f"({tr.idx}/{len(tr.frames)})")
-            self._overlay(cv, tr, dim_bg=not painted)
+            self._draw_traj_overlay(cv, tr, w, h)
 
-    def _overlay(self, cv: tk.Canvas, tr: MouseTrack, dim_bg: bool):
-        cv.delete("traj")
-        w, h = self.TILE_W, self.TILE_H
+    # ---- drawing helpers ----
+    def _to_px(self, w, h):
         half_w = self.app.cage_w / 2
         half_h = self.app.cage_h / 2
         span = max(half_w, half_h) * 2 * 1.08 or 1.0
-        def to_px(x, y):
-            return (w / 2 + x / span * w, h / 2 + y / span * h)
-        # full planned path (thin), then current target + dead-reckoned pose
+        return half_w, half_h, (lambda x, y: (w / 2 + x / span * w, h / 2 + y / span * h))
+
+    def _draw_traj(self, cv: tk.Canvas, tr: "MouseTrack"):
+        """Standalone trajectory tile: cage box + safe zone + path + live pose."""
+        cv.delete("all")
+        w = max(1, cv.winfo_width()); h = max(1, cv.winfo_height())
+        half_w, half_h, to_px = self._to_px(w, h)
+        m = self.app.cage_margin
+        cv.create_rectangle(*to_px(-half_w, -half_h), *to_px(half_w, half_h),
+                            outline="#8a8aa8", width=1)
+        cv.create_rectangle(*to_px(-half_w + m, -half_h + m), *to_px(half_w - m, half_h - m),
+                            outline="#3aa655", dash=(4, 3))
+        self._draw_path_pose(cv, tr, to_px, tags=None)
+        cv.create_text(6, 6, anchor="nw", fill=tr.color, font=("Segoe UI", 8, "bold"),
+                       text=f"{tr.label}  {tr.idx}/{len(tr.frames)}")
+
+    def _draw_traj_overlay(self, cv: tk.Canvas, tr: "MouseTrack", w, h):
+        """Grid mode: path + pose drawn over the camera frame (no cage box)."""
+        cv.delete("traj")
+        _, _, to_px = self._to_px(w, h)
+        self._draw_path_pose(cv, tr, to_px, tags="traj")
+
+    def _draw_path_pose(self, cv, tr, to_px, tags):
+        kw = {"tags": tags} if tags else {}
         flat = []
         for x, y in tr.frames:
             px, py = to_px(x, y); flat += [px, py]
         if len(flat) >= 4:
-            cv.create_line(*flat, fill=tr.color, width=1, tags="traj")
+            cv.create_line(*flat, fill=tr.color, width=1, **kw)
         if tr.frames:
             mx, my = tr.frames[min(tr.idx, len(tr.frames) - 1)]
             px, py = to_px(mx, my)
-            cv.create_oval(px - 3, py - 3, px + 3, py + 3,
-                           fill=tr.color, outline="", tags="traj")
+            cv.create_oval(px - 3, py - 3, px + 3, py + 3, fill=tr.color, outline="", **kw)
         rpx, rpy = to_px(tr.rx, tr.ry)
         cv.create_oval(rpx - 6, rpy - 6, rpx + 6, rpy + 6,
-                       fill=tr.color, outline="#ffffff", width=2, tags="traj")
+                       fill=tr.color, outline="#ffffff", width=2, **kw)
         hx = tr.rx + 0.05 * math.cos(tr.rtheta)
         hy = tr.ry + 0.05 * math.sin(tr.rtheta)
-        cv.create_line(rpx, rpy, *to_px(hx, hy), fill="#ffffff", width=2, tags="traj")
+        cv.create_line(rpx, rpy, *to_px(hx, hy), fill="#ffffff", width=2, **kw)
 
 
 # ---- App -------------------------------------------------------------------
