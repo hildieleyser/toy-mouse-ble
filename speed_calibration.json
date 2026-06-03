@@ -1,0 +1,7 @@
+{
+  "measured_at": "2026-06-03T00:00:00",
+  "run_seconds": 2.0,
+  "note": "Manual single-speed model (2026-06-03): on the current toys only byte 4 (~0.6 m/s) drives reliably forward; higher bytes spun/veered. So byte 4 is the deadband floor AND the cap. byte 19 is pinned to 0.59 (< v_min 0.6) so v_max < v_min and the planner's continuous branch never fires -- every frame is duty-cycled at byte 4, and the path is time-warped to a 0.6 m/s ceiling. Re-run calibrate_speed.py once more bytes behave to replace this.",
+  "points": [[3, 0.0], [4, 0.6], [19, 0.59]],
+  "deadband_byte": 4
+}

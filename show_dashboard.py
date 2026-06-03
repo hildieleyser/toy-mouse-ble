@@ -90,7 +90,8 @@ class ShowApp:
         self.clip_labels = list(self.clips_by_label.keys())
 
         # persisted, live-tunable settings
-        self.min_pulse_ms = int(self.cfg.get("min_pulse_ms", 100))
+        self.min_pulse_ms = int(self.cfg.get("min_pulse_ms", 40))
+        self.gap_ms = int(self.cfg.get("gap_ms", 0))
         self.clearance_m = float(self.cfg.get("clearance_m", 0.05))
         self.drive_var = tk.BooleanVar(value=bool(self.cfg.get("drive", True)))
         self.video_var = tk.BooleanVar(value=bool(self.cfg.get("video", True)))
@@ -197,6 +198,8 @@ class ShowApp:
         steppers = ttk.Frame(right, style="App.TFrame"); steppers.pack(fill="x", pady=4)
         self.pulse_lbl = self._stepper(steppers, "min pulse", self._fmt_pulse,
                                        lambda d: self.on_step_pulse(d))
+        self.gap_lbl = self._stepper(steppers, "gap", self._fmt_gap,
+                                     lambda d: self.on_step_gap(d))
         self.clear_lbl = self._stepper(steppers, "clearance", self._fmt_clear,
                                        lambda d: self.on_step_clear(d))
 
@@ -220,6 +223,7 @@ class ShowApp:
         return val
 
     def _fmt_pulse(self): return f"{self.min_pulse_ms} ms"
+    def _fmt_gap(self): return f"{self.gap_ms} ms"
     def _fmt_clear(self): return f"{self.clearance_m:.2f} m"
 
     def _toggle(self, var, btn, name):
@@ -232,15 +236,21 @@ class ShowApp:
                    activebackground=OK if on else SURFACE2)
 
     def on_step_pulse(self, d):
-        self.min_pulse_ms = max(40, min(400, self.min_pulse_ms + 20 * d))
+        # 20ms floor; note the 30Hz loop quantises actual pulses to ~33ms steps
+        self.min_pulse_ms = max(20, min(400, self.min_pulse_ms + 20 * d))
         self.pulse_lbl.config(text=self._fmt_pulse()); self._persist()
+
+    def on_step_gap(self, d):
+        self.gap_ms = max(0, min(800, self.gap_ms + 20 * d))
+        self.gap_lbl.config(text=self._fmt_gap()); self._persist()
 
     def on_step_clear(self, d):
         self.clearance_m = max(0.0, min(0.20, round(self.clearance_m + 0.01 * d, 2)))
         self.clear_lbl.config(text=self._fmt_clear()); self._persist()
 
     def _persist(self):
-        self.cfg.update(min_pulse_ms=self.min_pulse_ms, clearance_m=self.clearance_m,
+        self.cfg.update(min_pulse_ms=self.min_pulse_ms, gap_ms=self.gap_ms,
+                        clearance_m=self.clearance_m,
                         drive=self.drive_var.get(), video=self.video_var.get())
         save_show_config(self.cfg)
 
@@ -486,8 +496,8 @@ class ShowApp:
         self._pause()
         for tr in self.tracks.values():
             tr.reset()
-        self.pulse_state = {s: {"dir": None, "until": 0.0, "idle_sent": True}
-                            for s in self.tracks}
+        self.pulse_state = {s: {"dir": None, "until": 0.0, "gap_until": 0.0,
+                                "idle_sent": True} for s in self.tracks}
         self._render_frame()
 
     def on_fullscreen(self):
@@ -518,19 +528,27 @@ class ShowApp:
         self.after_id = self.root.after(int(1000 * self.MASTER_DT), self._tick)
 
     def _resolve_pulse(self, slug, direction, byte, drive_now, now):
-        """Coalesce duty pulses to a minimum width so the toy actually latches them.
-        Returns (payload|None, label); None means 'send nothing this tick'."""
-        st = self.pulse_state.setdefault(slug, {"dir": None, "until": 0.0, "idle_sent": True})
-        min_s = self.min_pulse_ms / 1000.0
-        if drive_now and direction is not None:
-            st["dir"], st["byte"], st["until"], st["idle_sent"] = direction, byte, now + min_s, False
-            return build_raw(direction, byte), direction
+        """Shape each duty pulse so the toy actually latches it, and optionally rest
+        between pulses. A pulse is held for at least `min_pulse_ms`; after it ends the
+        toy stays stopped for at least `gap_ms` before the next pulse may start (gap
+        lets a mouse cover less ground over a longer time). Returns (payload|None,
+        label); None means 'send nothing this tick'."""
+        st = self.pulse_state.setdefault(
+            slug, {"dir": None, "until": 0.0, "gap_until": 0.0, "idle_sent": True})
+        # 1) mid-pulse: keep holding until the minimum width is met
         if st["dir"] is not None and now < st["until"]:
             return build_raw(st["dir"], st["byte"]), ""        # hold; no log spam
-        st["dir"] = None
-        if not st["idle_sent"]:
+        # 2) a pulse just ended: stop once and open the rest/gap window
+        if st["dir"] is not None:
+            st["dir"] = None
+            st["gap_until"] = now + self.gap_ms / 1000.0
             st["idle_sent"] = True
             return build_stop(), "stop"
+        # 3) idle: start a new pulse only if asked AND past the gap
+        if drive_now and direction is not None and now >= st["gap_until"]:
+            st["dir"], st["byte"], st["until"], st["idle_sent"] = \
+                direction, byte, now + self.min_pulse_ms / 1000.0, False
+            return build_raw(direction, byte), direction
         return None, None
 
     def _render_frame(self):
@@ -551,7 +569,9 @@ class ShowApp:
         drive = "ON" if self.drive_var.get() else "off (preview)"
         head = "playing" if playing else "paused"
         extra = ("  ·  " + ", ".join(notes)) if notes else ""
-        self.show_status.set(f"{head}  ·  driving {drive}  ·  min pulse {self.min_pulse_ms}ms{extra}")
+        gap = f" +{self.gap_ms}ms gap" if self.gap_ms else ""
+        self.show_status.set(
+            f"{head}  ·  driving {drive}  ·  pulse {self.min_pulse_ms}ms{gap}{extra}")
 
     def _draw_traj(self, cv: tk.Canvas, tr: MouseTrack):
         cv.delete("all")
@@ -634,7 +654,8 @@ class ShowApp:
             self.setup_status.set("no usable trajectories — check the clips."); return
         self.tracks = tracks
         self.cam_mp4s = cam_mp4s
-        self.pulse_state = {s: {"dir": None, "until": 0.0, "idle_sent": True} for s in tracks}
+        self.pulse_state = {s: {"dir": None, "until": 0.0, "gap_until": 0.0,
+                                "idle_sent": True} for s in tracks}
         self._build_cards()
         self._goto_show()
         self.on_reset()
