@@ -73,6 +73,11 @@ WARN = "#f7b500"
 
 CAGE_W = CAGE_H = 0.5            # metres (fixed real cage)
 SRC_FPS = 30.0
+# Hard cap on the SPEED byte ever sent, regardless of the speed model. On the
+# current toys only byte 4 (~0.6 m/s) drives reliably; higher bytes spin/veer.
+# This guarantees byte 4 even if speed_calibration.json is missing (which would
+# otherwise fall back to the provisional model and command higher bytes).
+MAX_SPEED_BYTE = 4
 MAX_VIDEO_CARDS = 3             # software-decode budget on the Pi 5
 
 TRAJ_PX = 170                  # trajectory canvas (square)
@@ -561,6 +566,7 @@ class ShowApp:
         all_done = True
         for slug, tr in self.tracks.items():
             direction, byte, drive_now = tr.advance(self.MASTER_DT)
+            byte = min(byte, MAX_SPEED_BYTE)     # hard safety cap (see MAX_SPEED_BYTE)
             if not tr.done:
                 all_done = False
             if drive:
