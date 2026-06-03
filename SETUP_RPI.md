@@ -4,6 +4,28 @@ Setup for the field rig: a Pi 5 (4GB) driving toy mice over BLE, with the V2
 touch dashboard (`show_dashboard.py`) on a 1280×480 HDMI touchscreen, off the
 repo's bundled offline clips (no Backblaze needed).
 
+## 0. TL;DR
+
+One-time, install the system libraries:
+
+```bash
+sudo apt update
+sudo apt install -y python3-tk python3-opencv python3-pil python3-pil.imagetk python3-venv
+```
+
+Then every time, just run the launcher — it creates the venv on first use and
+starts the dashboard:
+
+```bash
+cd ~/toy-mouse-ble
+./run.sh             # fullscreen on the touchscreen
+./run.sh --pull      # git pull first, then run
+./run.sh --windowed  # windowed, for testing
+```
+
+(Run `python calibrate_speed.py` once first — see §4.) The rest of this doc
+explains what `run.sh` does and how to do it by hand.
+
 ## 1. Dependencies
 
 On Raspberry Pi OS **Bookworm** the system Python is "externally managed"
@@ -54,11 +76,26 @@ SSH after `export DISPLAY=:0`.
 
 ## 4. Run it
 
+Easiest — the launcher handles the venv + display for you:
+
 ```bash
-source .venv/bin/activate            # if you made one
-python calibrate_speed.py            # once: scans, pick a mouse, measure speeds
-python show_dashboard.py             # fullscreen on the touchscreen
-# python show_dashboard.py --windowed   # 1280×480 window for testing
+./run.sh                             # fullscreen (creates .venv on first run)
+./run.sh --windowed                  # windowed, for testing
+./run.sh --pull                      # git pull first, then run
+```
+
+Calibrate once before the first show:
+
+```bash
+source .venv/bin/activate
+python calibrate_speed.py            # scans, pick a mouse, measure speeds
+```
+
+Equivalent manual launch:
+
+```bash
+source .venv/bin/activate
+python show_dashboard.py             # or: --windowed
 ```
 
 - `calibrate_speed.py` now **scans and connects to any mouse in range** (picker if
