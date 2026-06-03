@@ -78,6 +78,10 @@ SRC_FPS = 30.0
 # This guarantees byte 4 even if speed_calibration.json is missing (which would
 # otherwise fall back to the provisional model and command higher bytes).
 MAX_SPEED_BYTE = 4
+# Mandatory rest after EVERY forward burst (seconds). Even at full duty the toy
+# must come to a real stop between bursts -- never continuous forward (which just
+# drives it off the side). The user 'gap' stepper can add more on top of this.
+MIN_GAP_S = 0.12
 MAX_VIDEO_CARDS = 3             # software-decode budget on the Pi 5
 
 TRAJ_PX = 170                  # trajectory canvas (square)
@@ -595,10 +599,12 @@ class ShowApp:
         # 1) mid-pulse: keep holding until the minimum width is met
         if st["dir"] is not None and now < st["until"]:
             return build_raw(st["dir"], st["byte"]), ""        # hold; no log spam
-        # 2) a pulse just ended: stop and open the rest/gap window
+        # 2) a pulse just ended: stop and open the rest/gap window. The rest is at
+        #    least MIN_GAP_S so the toy actually halts between bursts -- never
+        #    continuous forward -- plus whatever extra the user dialled in.
         if st["dir"] is not None:
             st["dir"] = None
-            st["gap_until"] = now + self.gap_ms / 1000.0
+            st["gap_until"] = now + max(self.gap_ms / 1000.0, MIN_GAP_S)
             st["last_stop"] = now
             return build_stop(), "stop"
         # 3) idle but a new pulse is wanted and the gap has elapsed -> drive
