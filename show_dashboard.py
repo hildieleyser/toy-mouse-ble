@@ -73,6 +73,7 @@ WARN = "#f7b500"
 
 CAGE_W = CAGE_H = 0.5            # metres (fixed real cage)
 SRC_FPS = 30.0
+BODYPART = "Snout"              # keypoint whose trajectory the toy follows
 # Hard cap on the SPEED byte ever sent, regardless of the speed model. On the
 # current toys only byte 4 (~0.6 m/s) drives reliably; higher bytes spin/veer.
 # This guarantees byte 4 even if speed_calibration.json is missing (which would
@@ -713,7 +714,6 @@ class ShowApp:
         self.setup_status.set("preparing tracks...")
         want_video = self.video_var.get()
         clearance = self.clearance_m
-        pace = self.speed_pct / 100.0
 
         def worker():
             tracks: dict[str, MouseTrack] = {}
@@ -724,19 +724,15 @@ class ShowApp:
                 if spec is None or not spec.csv_local:
                     continue
                 try:
-                    pts, _ = T.read_csv_points(str(spec.csv_local), bodypart="Tailbase")
+                    pts, _ = T.read_csv_points(str(spec.csv_local), bodypart=BODYPART)
                 except Exception as e:
                     self._log(f"{slug}: CSV read failed: {e}"); continue
                 if not pts:
                     continue
                 color = self._slug_color(slug)
-                tr = MouseTrack(slug, self._clip_display(label), pts,
-                                (CAGE_W, CAGE_H, clearance), SRC_FPS,
-                                self.speed_model, color)
-                if 0 < pace < 1.0:        # slow the whole clip: smaller targets -> more rest
-                    tr.timewarp /= pace
-                    tr.eff_fps = tr.src_fps / tr.timewarp
-                tracks[slug] = tr
+                tracks[slug] = MouseTrack(slug, self._clip_display(label), pts,
+                                          (CAGE_W, CAGE_H, clearance), SRC_FPS,
+                                          self.speed_model, color)
                 if want_video and len(cam_mp4s) < MAX_VIDEO_CARDS:
                     try:
                         _, mp4s = extract_clip_mp4s(spec, CAMERAS)
@@ -750,6 +746,15 @@ class ShowApp:
     def _finish_start(self, tracks, cam_mp4s):
         if not tracks:
             self.setup_status.set("no usable trajectories — check the clips."); return
+        # Shared pace: drive every mouse at one time-warp (the slowest clip's, so no
+        # clip exceeds the speed cap), then apply the speed-% pace. This keeps all
+        # tracks in lockstep so their videos + trajectories stay frame-aligned
+        # instead of each clip playing at its own rate.
+        pace = max(0.2, self.speed_pct / 100.0)
+        sync_tw = max(tr.timewarp for tr in tracks.values()) / pace
+        for tr in tracks.values():
+            tr.timewarp = sync_tw
+            tr.eff_fps = tr.src_fps / sync_tw
         self.tracks = tracks
         self.cam_mp4s = cam_mp4s
         self.pulse_state = {s: {"dir": None, "until": 0.0, "gap_until": 0.0,
