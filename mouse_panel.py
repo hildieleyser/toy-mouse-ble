@@ -307,11 +307,17 @@ class TrajectoryPlayer:
                 direction = "right"
                 self.rtheta -= self.TURN_STEP
 
-        # duty-cycle: only actually drive on a `duty` fraction of ticks
-        self.duty_acc += duty
-        drive_this_tick = direction is not None and self.duty_acc >= 1.0
-        if drive_this_tick:
-            self.duty_acc -= 1.0
+        # duty-cycle: only actually drive on a `duty` fraction of ticks — but
+        # FORWARD motion only. Turns are never gated: a turn pulse dropped by the
+        # duty cycle is a turn the toy never makes, so the real mouse under-rotates
+        # versus the heading the preview swings through. Send every turn tick.
+        if direction in ("left", "right"):
+            drive_this_tick = True
+        else:
+            self.duty_acc += duty
+            drive_this_tick = direction is not None and self.duty_acc >= 1.0
+            if drive_this_tick:
+                self.duty_acc -= 1.0
 
         # Geofence: the *planned* path already sits inside the safe zone (the
         # cage-fit guarantees that), so being near the safe edge is normal and
