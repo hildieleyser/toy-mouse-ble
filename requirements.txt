@@ -1,0 +1,20 @@
+# Python dependencies for the toy-mouse dashboards.
+#
+# On a Raspberry Pi (Bookworm) install OpenCV + Pillow + Tk from apt — the ARM
+# pip wheels are painful — and only `bleak` via pip. See SETUP_RPI.md.
+#   sudo apt install python3-tk python3-opencv python3-pil python3-pil.imagetk
+#
+# On a desktop dev machine (Windows/macOS/Linux x86) just pip-install everything
+# below plus opencv-python + Pillow:
+#   pip install bleak opencv-python Pillow imageio-ffmpeg
+
+bleak>=0.21          # BLE transport (mouse_fleet, calibrate_speed)
+
+# Provided by apt on the Pi (NOT installed here):
+#   opencv-python    # cv2 — decodes the camera-tile mp4s (video_tile.py)
+#   Pillow           # PIL/ImageTk — paints frames onto the Tk canvas
+#   python3-tk       # tkinter GUI toolkit (not a PyPI package)
+#
+# Only needed to (re)extract NON-bundled clips from Backblaze B2 — NOT for
+# playing the bundled clips on the Pi:
+#   imageio-ffmpeg
