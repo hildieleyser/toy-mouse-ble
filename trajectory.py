@@ -159,15 +159,29 @@ def smooth(points: list[tuple[float, float]], window: int
     return out
 
 
-def choose_timewarp(speeds: list[float], v_max: float) -> float:
+def choose_timewarp(speeds: list[float], v_max: float, pct: float = 1.0) -> float:
     """Global playback-rate divisor so the fastest segment fits under v_max.
 
     Returns T >= 1.0. Replay frames at fps/T and divide every desired speed by
     T. T=1 means the toy can keep up with the real timing; T>1 means we had to
     slow the whole clip down because the mouse out-ran the toy somewhere.
+
+    `pct` (0..1] picks which quantile of the per-frame speeds counts as the
+    "peak". pct=1.0 uses the strict maximum (original behaviour). pct<1.0 uses a
+    high percentile instead, so a single jittery keypoint frame — which produces
+    a huge bogus speed — can't slow the whole clip to a crawl. The genuinely
+    fastest darts above that percentile just get clipped (the toy can't match
+    them anyway).
     """
-    peak = max(speeds) if speeds else 0.0
-    if v_max <= 0 or peak <= v_max:
+    if not speeds or v_max <= 0:
+        return 1.0
+    if pct >= 1.0:
+        peak = max(speeds)
+    else:
+        s = sorted(speeds)
+        k = min(len(s) - 1, max(0, int(round(pct * (len(s) - 1)))))
+        peak = s[k]
+    if peak <= v_max:
         return 1.0
     return peak / v_max
 

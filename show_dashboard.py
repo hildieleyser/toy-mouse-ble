@@ -83,6 +83,13 @@ MAX_SPEED_BYTE = 4
 # must come to a real stop between bursts -- never continuous forward (which just
 # drives it off the side). The user 'gap' stepper can add more on top of this.
 MIN_GAP_S = 0.12
+# Time-warp pacing (steady slow playback, not exact speed matching):
+#   * use the 90th-percentile frame speed as the "peak" so one jittery keypoint
+#     can't slow the whole show to a crawl (the bug that froze the frame rate);
+#   * never warp slower than MAX_TIMEWARP, so playback can't drop below
+#     SRC_FPS / MAX_TIMEWARP (~5 fps) no matter what the clips contain.
+TIMEWARP_PCT = 0.9
+MAX_TIMEWARP = 6.0
 MAX_VIDEO_CARDS = 3             # software-decode budget on the Pi 5
 
 
@@ -774,12 +781,18 @@ class ShowApp:
     def _finish_start(self, tracks, cam_mp4s):
         if not tracks:
             self.setup_status.set("no usable trajectories — check the clips."); return
-        # Shared pace: drive every mouse at one time-warp (the slowest clip's, so no
-        # clip exceeds the speed cap), then apply the speed-% pace. This keeps all
-        # tracks in lockstep so their videos + trajectories stay frame-aligned
-        # instead of each clip playing at its own rate.
+        # Steady slow playback: one shared time-warp paces every clip so the
+        # videos + trajectories stay frame-aligned. It's the worst clip's warp,
+        # but computed from a robust percentile (TIMEWARP_PCT) so a single jittery
+        # keypoint can't slow the whole show to a crawl, and clamped to
+        # MAX_TIMEWARP so the frame rate always has a floor. The speed-% then
+        # scales this pace. Timing is approximate by design: the toy traces the
+        # shape, and the genuinely fastest darts just get clipped.
         pace = max(0.2, self.speed_pct / 100.0)
-        sync_tw = max(tr.timewarp for tr in tracks.values()) / pace
+        v_max = self.speed_model.v_max
+        worst_tw = max(T.choose_timewarp(tr.speeds, v_max, pct=TIMEWARP_PCT)
+                       for tr in tracks.values())
+        sync_tw = min(worst_tw, MAX_TIMEWARP) / pace
         for tr in tracks.values():
             tr.timewarp = sync_tw
             tr.eff_fps = tr.src_fps / sync_tw
