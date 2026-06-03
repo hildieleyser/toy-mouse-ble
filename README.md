@@ -108,6 +108,28 @@ decoder) and to fit a normal git repo. To drive a mouse only the bundled
 trajectory CSV is used, so motion is identical to the full-res source. See
 `clips/README.md`; regenerate with `python build_bundled_clips.py`.
 
+## Simplified touch dashboard (V2 — `show_dashboard.py`)
+
+A stripped-down, touch-only dashboard for the field rig (a 27×12 cm / 1280×480 HDMI
+touchscreen on the Pi 5). It does only three things: connect mice, pick which mice +
+which bundled clip each one plays, then play the trajectories + camera videos while
+driving the mice.
+
+    python3 show_dashboard.py              # fullscreen on the touchscreen
+    python3 show_dashboard.py --windowed   # 1280×480 window, for desktop dev
+
+- **Setup screen:** tap a mouse chip to connect/disconnect; per-mouse `◀ ▶` to choose a
+  clip (or 🎲 / **Shuffle all** for random); big **Drive** / **Video** toggles; touch
+  steppers for **min pulse** and **clearance**.
+- **Show screen:** one card per mouse — trajectory + a camera tile (tap the camera to
+  cycle angle) — with big Play/Pause/Reset/Fullscreen.
+- **Cage** defaults to 0.5×0.5 m with 0.05 m clearance, so the path spans ~0.4 m.
+- **Driving:** reuses the same cage-fit + speed/duty-cycle engine as the choreographer,
+  but **coalesces each duty pulse to a minimum width** (default 100 ms, adjustable live)
+  so the toy actually latches the short commands a 0.4 m cage produces. Run
+  `calibrate_speed.py` first so the speed model isn't provisional. Settings persist to
+  `show_config.json`. It reuses the shared `video_tile.TileVideo` decoder.
+
 ## Per-mouse choreography (a different clip per mouse)
 
 The **Per-mouse choreography** card runs 4–6 mice, each following its **own**
