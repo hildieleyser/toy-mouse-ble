@@ -92,18 +92,10 @@ class MouseTrack:
                 direction = "right"
                 self.rtheta -= self.TURN_STEP
 
-        # Pulse/gap duty-cycling is for FORWARD crawls only — the toy is too fast
-        # to creep slowly, so we pulse it. Turns must NOT be gated: a turn pulse
-        # dropped by the duty cycle is a turn the toy never makes, so the real
-        # mouse under-rotates relative to the heading the preview swings through.
-        # Drive every turn tick so the toy actually swings around as far as shown.
-        if direction in ("left", "right"):
-            drive_now = True
-        else:
-            self.duty_acc += duty
-            drive_now = direction is not None and self.duty_acc >= 1.0
-            if drive_now:
-                self.duty_acc -= 1.0
+        self.duty_acc += duty
+        drive_now = direction is not None and self.duty_acc >= 1.0
+        if drive_now:
+            self.duty_acc -= 1.0
 
         self.geofenced = False
         v_actual = self.model.byte_to_speed(byte)
