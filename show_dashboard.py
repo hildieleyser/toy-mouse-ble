@@ -92,6 +92,7 @@ class ShowApp:
         # persisted, live-tunable settings
         self.min_pulse_ms = int(self.cfg.get("min_pulse_ms", 40))
         self.gap_ms = int(self.cfg.get("gap_ms", 0))
+        self.speed_pct = int(self.cfg.get("speed_pct", 100))   # overall pace (slows playback)
         self.clearance_m = float(self.cfg.get("clearance_m", 0.05))
         self.drive_var = tk.BooleanVar(value=bool(self.cfg.get("drive", True)))
         self.video_var = tk.BooleanVar(value=bool(self.cfg.get("video", True)))
@@ -196,6 +197,8 @@ class ShowApp:
                    command=self.on_shuffle_all).pack(anchor="w", pady=2)
 
         steppers = ttk.Frame(right, style="App.TFrame"); steppers.pack(fill="x", pady=4)
+        self.speed_lbl = self._stepper(steppers, "speed", self._fmt_speed,
+                                       lambda d: self.on_step_speed(d))
         self.pulse_lbl = self._stepper(steppers, "min pulse", self._fmt_pulse,
                                        lambda d: self.on_step_pulse(d))
         self.gap_lbl = self._stepper(steppers, "gap", self._fmt_gap,
@@ -222,6 +225,7 @@ class ShowApp:
                   bg=SURFACE, fg=TEXT).pack(side="left", padx=3)
         return val
 
+    def _fmt_speed(self): return f"{self.speed_pct} %"
     def _fmt_pulse(self): return f"{self.min_pulse_ms} ms"
     def _fmt_gap(self): return f"{self.gap_ms} ms"
     def _fmt_clear(self): return f"{self.clearance_m:.2f} m"
@@ -234,6 +238,11 @@ class ShowApp:
         btn.config(text=f"{name}: {'ON' if on else 'off'}",
                    bg=OK if on else SURFACE, fg="#06121f" if on else MUTED,
                    activebackground=OK if on else SURFACE2)
+
+    def on_step_speed(self, d):
+        # overall pace: lower = slower mice (more rest), applied on next START
+        self.speed_pct = max(20, min(100, self.speed_pct + 10 * d))
+        self.speed_lbl.config(text=self._fmt_speed()); self._persist()
 
     def on_step_pulse(self, d):
         # 20ms floor; note the 30Hz loop quantises actual pulses to ~33ms steps
@@ -250,7 +259,7 @@ class ShowApp:
 
     def _persist(self):
         self.cfg.update(min_pulse_ms=self.min_pulse_ms, gap_ms=self.gap_ms,
-                        clearance_m=self.clearance_m,
+                        speed_pct=self.speed_pct, clearance_m=self.clearance_m,
                         drive=self.drive_var.get(), video=self.video_var.get())
         save_show_config(self.cfg)
 
@@ -277,10 +286,37 @@ class ShowApp:
         slug = self._slug_for_mac(mac)
         if slug is not None:
             self.fleet.submit(self.fleet.disconnect(slug))
-            self.setup_status.set(f"disconnecting {slug}...")
+            self.setup_status.set(f"disconnecting #{self._num(slug)}...")
         else:
-            self.fleet.submit(self.fleet.connect(mac, slug=R.slug_for_mac(mac)))
-            self.setup_status.set(f"connecting {R.describe_mac(mac)}...")
+            slug = self._connect_slug_for(mac)
+            self.fleet.submit(self.fleet.connect(mac, slug=slug))
+            self.setup_status.set(f"connecting #{self._num(slug)}...")
+
+    @staticmethod
+    def _num(slug: str | None):
+        """The mouse number from a 'mouseN' slug (1..6), or None."""
+        if not slug:
+            return None
+        digits = "".join(ch for ch in slug if ch.isdigit())
+        return int(digits) if digits else None
+
+    def _connect_slug_for(self, mac: str) -> str | None:
+        """Stable 'mouseN' slug for a MAC: its roster number if known, else the
+        lowest 1..6 the roster doesn't reserve for a known MAC and that isn't
+        already connected (so an unknown toy takes the remaining number — e.g. #6
+        — without stealing a labelled mouse's slot)."""
+        s = R.slug_for_mac(mac)
+        if s:
+            return s
+        roster_nums = {m["number"] for m in R.load_roster() if m["mac"]}
+        used = {self._num(h.slug) for h in self.fleet.mice.values() if h.connected}
+        for n in range(1, 7):
+            if n not in roster_nums and n not in used:
+                return f"mouse{n}"
+        for n in range(1, 7):                      # fallback: any free number
+            if n not in used:
+                return f"mouse{n}"
+        return None                                # all 6 taken -> fleet auto-slugs
 
     def _render_chips(self):
         for w in self.chips_f.winfo_children():
@@ -291,15 +327,24 @@ class ShowApp:
                 macs.append(h.mac)
         rssi = {m: r for m, _, r in self.found}
         cols = 2
+        roster = R.load_roster()
         for i, mac in enumerate(macs):
             slug = self._slug_for_mac(mac)
             color = self._slug_color(slug) if slug else MUTED
             r, c = divmod(i, cols)
-            txt = f"{'●' if slug else '○'} {R.describe_mac(mac)}"
-            sub = slug if slug else (f"{rssi.get(mac, '?')} dBm")
-            chip = tk.Button(self.chips_f, text=f"{txt}\n{sub}", width=14, height=2,
+            entry = R.entry_for_mac(mac, roster)
+            if slug:                                   # connected -> its number
+                head = f"● #{self._num(slug)}"
+                sub = "connected"
+            elif entry:                                # known toy, not connected
+                head = f"○ #{entry['number']}"
+                sub = ("FAULTY · " if entry["faulty"] else "") + f"{rssi.get(mac, '?')} dBm"
+            else:                                      # unknown toy
+                head = "○ new"
+                sub = f"{rssi.get(mac, '?')} dBm"
+            chip = tk.Button(self.chips_f, text=f"{head}\n{sub}", width=12, height=2,
                              relief="flat", bd=0, justify="left",
-                             font=("Segoe UI", 12, "bold"),
+                             font=("Segoe UI", 15, "bold"),
                              bg=SURFACE if slug else SURFACE2,
                              fg=color if slug else TEXT,
                              activebackground=SURFACE2,
@@ -331,8 +376,8 @@ class ShowApp:
             return
         for slug in slugs:
             row = ttk.Frame(self.assign_f, style="App.TFrame"); row.pack(fill="x", pady=3)
-            tk.Label(row, text="●", fg=self._slug_color(slug), bg=BG,
-                     font=("Segoe UI", 14)).pack(side="left")
+            tk.Label(row, text=f"● #{self._num(slug)}", fg=self._slug_color(slug), bg=BG,
+                     width=5, anchor="w", font=("Segoe UI", 14, "bold")).pack(side="left")
             tk.Button(row, text="◀", width=2, relief="flat", bd=0, bg=SURFACE, fg=TEXT,
                       font=("Segoe UI", 13, "bold"),
                       command=lambda s=slug: self.on_clip_cycle(s, -1)).pack(side="left", padx=2)
@@ -440,9 +485,11 @@ class ShowApp:
             cell.grid(row=0, column=i, padx=6, sticky="nsew")
             self.cards_f.columnconfigure(i, weight=1)
             self.cards_f.rowconfigure(0, weight=1)
-            tk.Label(cell, text=f"●  {slug}   {self._clip_display(self.assign.get(slug))}",
+            tk.Label(cell, text=f"●  #{self._num(slug)}   {self._clip_display(self.assign.get(slug))}",
                      bg=color, fg="#06121f", anchor="w",
                      font=("Segoe UI", 12, "bold")).pack(fill="x")
+            tk.Label(cell, text="⮞ " + self._placement_hint(tr), bg=BG, fg="#2ecc71",
+                     anchor="w", font=("Segoe UI", 11, "bold")).pack(fill="x")
             pair = tk.Frame(cell, bg=BG); pair.pack(fill="both", expand=True)
             tcv = tk.Canvas(pair, width=TRAJ_PX, height=TRAJ_PX, bg="#0c0c12",
                             highlightthickness=0)
@@ -570,8 +617,9 @@ class ShowApp:
         head = "playing" if playing else "paused"
         extra = ("  ·  " + ", ".join(notes)) if notes else ""
         gap = f" +{self.gap_ms}ms gap" if self.gap_ms else ""
+        spd = f"  ·  speed {self.speed_pct}%" if self.speed_pct != 100 else ""
         self.show_status.set(
-            f"{head}  ·  driving {drive}  ·  pulse {self.min_pulse_ms}ms{gap}{extra}")
+            f"{head}  ·  driving {drive}  ·  pulse {self.min_pulse_ms}ms{gap}{spd}{extra}")
 
     def _draw_traj(self, cv: tk.Canvas, tr: MouseTrack):
         cv.delete("all")
@@ -594,11 +642,37 @@ class ShowApp:
             mx, my = tr.frames[min(tr.idx, len(tr.frames) - 1)]
             a, b = px(mx, my)
             cv.create_oval(a - 3, b - 3, a + 3, b + 3, fill=tr.color, outline="")
+        # START marker: where to place the toy + which way to point its nose
+        if len(tr.frames) >= 2:
+            sx, sy = tr.frames[0]
+            sa, sb = px(sx, sy)
+            sth = T.heading_of(tr.frames[0], tr.frames[1])
+            cv.create_oval(sa - 6, sb - 6, sa + 6, sb + 6, outline="#2ecc71", width=2)
+            cv.create_line(sa, sb, *px(sx + 0.08 * math.cos(sth), sy + 0.08 * math.sin(sth)),
+                           fill="#2ecc71", width=3, arrow="last")
+            cv.create_text(sa, sb - 11, text="START", fill="#2ecc71",
+                           font=("Segoe UI", 8, "bold"))
         ra, rb = px(tr.rx, tr.ry)
         cv.create_oval(ra - 5, rb - 5, ra + 5, rb + 5, fill=tr.color, outline="#fff", width=2)
         hx = tr.rx + 0.05 * math.cos(tr.rtheta)
         hy = tr.ry + 0.05 * math.sin(tr.rtheta)
         cv.create_line(ra, rb, *px(hx, hy), fill="#fff", width=2)
+
+    def _placement_hint(self, tr: MouseTrack) -> str:
+        """Human-readable 'where to put the toy + which way it faces', relative to
+        the trajectory plot (top = +y, right = +x), so it doesn't drive at a wall."""
+        if len(tr.frames) < 2:
+            return ""
+        x, y = tr.frames[0]
+        th = T.heading_of(tr.frames[0], tr.frames[1])
+        third = CAGE_W / 6                       # cage half is CAGE_W/2; thirds of it
+        col = "left" if x < -third else ("right" if x > third else "centre")
+        rowp = "top" if y > third else ("bottom" if y < -third else "middle")
+        parts = [p for p in (rowp, col) if p not in ("middle", "centre")]
+        where = "-".join(parts) if parts else "centre"
+        faces = ["→ right", "↗", "↑ top", "↖", "← left", "↙", "↓ bottom", "↘"]
+        k = int(round((th % (2 * math.pi)) / (math.pi / 4))) % 8
+        return f"place {where}, nose {faces[k]}"
 
     # ---- view switching ----
     def _goto_setup(self):
@@ -620,6 +694,7 @@ class ShowApp:
         self.setup_status.set("preparing tracks...")
         want_video = self.video_var.get()
         clearance = self.clearance_m
+        pace = self.speed_pct / 100.0
 
         def worker():
             tracks: dict[str, MouseTrack] = {}
@@ -636,9 +711,13 @@ class ShowApp:
                 if not pts:
                     continue
                 color = self._slug_color(slug)
-                tracks[slug] = MouseTrack(slug, self._clip_display(label), pts,
-                                          (CAGE_W, CAGE_H, clearance), SRC_FPS,
-                                          self.speed_model, color)
+                tr = MouseTrack(slug, self._clip_display(label), pts,
+                                (CAGE_W, CAGE_H, clearance), SRC_FPS,
+                                self.speed_model, color)
+                if 0 < pace < 1.0:        # slow the whole clip: smaller targets -> more rest
+                    tr.timewarp /= pace
+                    tr.eff_fps = tr.src_fps / tr.timewarp
+                tracks[slug] = tr
                 if want_video and len(cam_mp4s) < MAX_VIDEO_CARDS:
                     try:
                         _, mp4s = extract_clip_mp4s(spec, CAMERAS)
