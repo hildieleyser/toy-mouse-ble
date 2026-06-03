@@ -73,7 +73,7 @@ WARN = "#f7b500"
 
 CAGE_W = CAGE_H = 0.5            # metres (fixed real cage)
 SRC_FPS = 30.0
-BODYPART = "Snout"              # keypoint whose trajectory the toy follows
+BODYPART = "ForeShdR"          # smoothest keypoint across the clips (least time-warp)
 # Hard cap on the SPEED byte ever sent, regardless of the speed model. On the
 # current toys only byte 4 (~0.6 m/s) drives reliably; higher bytes spin/veer.
 # This guarantees byte 4 even if speed_calibration.json is missing (which would
@@ -84,9 +84,6 @@ MAX_SPEED_BYTE = 4
 # drives it off the side). The user 'gap' stepper can add more on top of this.
 MIN_GAP_S = 0.12
 MAX_VIDEO_CARDS = 3             # software-decode budget on the Pi 5
-
-TRAJ_PX = 170                  # trajectory canvas (square)
-CAM_W, CAM_H = 210, 150        # camera tile box (720x320 source letterboxed)
 
 
 class ShowApp:
@@ -103,6 +100,7 @@ class ShowApp:
         self.min_pulse_ms = int(self.cfg.get("min_pulse_ms", 40))
         self.gap_ms = int(self.cfg.get("gap_ms", 0))
         self.speed_pct = int(self.cfg.get("speed_pct", 100))   # overall pace (slows playback)
+        self.smooth_win = int(self.cfg.get("smooth_win", 5))   # trajectory smoothing (frames)
         self.clearance_m = float(self.cfg.get("clearance_m", 0.05))
         self.drive_var = tk.BooleanVar(value=bool(self.cfg.get("drive", True)))
         self.video_var = tk.BooleanVar(value=bool(self.cfg.get("video", True)))
@@ -130,6 +128,8 @@ class ShowApp:
         root.bind("<space>", lambda e: self.on_play_pause())
         root.bind("<Escape>", lambda e: root.attributes("-fullscreen", False))
         root.bind("<Key-r>", lambda e: self.on_reset())
+        self._cfg_after = None
+        root.bind("<Configure>", self._on_configure)
 
         self.setup_frame = ttk.Frame(root, style="App.TFrame")
         self.show_frame = ttk.Frame(root, style="App.TFrame")
@@ -213,6 +213,8 @@ class ShowApp:
                                        lambda d: self.on_step_pulse(d))
         self.gap_lbl = self._stepper(steppers, "gap", self._fmt_gap,
                                      lambda d: self.on_step_gap(d))
+        self.smooth_lbl = self._stepper(steppers, "smooth", self._fmt_smooth,
+                                        lambda d: self.on_step_smooth(d))
         self.clear_lbl = self._stepper(steppers, "clearance", self._fmt_clear,
                                        lambda d: self.on_step_clear(d))
 
@@ -238,6 +240,7 @@ class ShowApp:
     def _fmt_speed(self): return f"{self.speed_pct} %"
     def _fmt_pulse(self): return f"{self.min_pulse_ms} ms"
     def _fmt_gap(self): return f"{self.gap_ms} ms"
+    def _fmt_smooth(self): return "off" if self.smooth_win <= 1 else f"{self.smooth_win} fr"
     def _fmt_clear(self): return f"{self.clearance_m:.2f} m"
 
     def _toggle(self, var, btn, name):
@@ -263,13 +266,19 @@ class ShowApp:
         self.gap_ms = max(0, min(800, self.gap_ms + 20 * d))
         self.gap_lbl.config(text=self._fmt_gap()); self._persist()
 
+    def on_step_smooth(self, d):
+        # trajectory smoothing window in frames; applied on next START
+        self.smooth_win = max(1, min(25, self.smooth_win + 2 * d))
+        self.smooth_lbl.config(text=self._fmt_smooth()); self._persist()
+
     def on_step_clear(self, d):
         self.clearance_m = max(0.0, min(0.20, round(self.clearance_m + 0.01 * d, 2)))
         self.clear_lbl.config(text=self._fmt_clear()); self._persist()
 
     def _persist(self):
         self.cfg.update(min_pulse_ms=self.min_pulse_ms, gap_ms=self.gap_ms,
-                        speed_pct=self.speed_pct, clearance_m=self.clearance_m,
+                        speed_pct=self.speed_pct, smooth_win=self.smooth_win,
+                        clearance_m=self.clearance_m,
                         drive=self.drive_var.get(), video=self.video_var.get())
         save_show_config(self.cfg)
 
@@ -495,29 +504,28 @@ class ShowApp:
             cell.grid(row=0, column=i, padx=6, sticky="nsew")
             self.cards_f.columnconfigure(i, weight=1)
             self.cards_f.rowconfigure(0, weight=1)
-            tk.Label(cell, text=f"●  #{self._num(slug)}   {self._clip_display(self.assign.get(slug))}",
-                     bg=color, fg="#06121f", anchor="w",
-                     font=("Segoe UI", 12, "bold")).pack(fill="x")
-            tk.Label(cell, text="⮞ " + self._placement_hint(tr), bg=BG, fg="#2ecc71",
-                     anchor="w", font=("Segoe UI", 11, "bold")).pack(fill="x")
-            pair = tk.Frame(cell, bg=BG); pair.pack(fill="both", expand=True)
-            tcv = tk.Canvas(pair, width=TRAJ_PX, height=TRAJ_PX, bg="#0c0c12",
-                            highlightthickness=0)
-            tcv.pack(side="left", padx=4, pady=4)
-            ccv = tk.Canvas(pair, width=CAM_W, height=CAM_H, bg="#0c0c12",
-                            highlightthickness=0)
-            ccv.pack(side="left", padx=4, pady=4)
+            # one column per mouse: header, trajectory (top), video (bottom), counter.
+            # The two canvases fill the column width; video gets more height so it
+            # fills the width when fullscreen.
+            cell.columnconfigure(0, weight=1)
+            cell.rowconfigure(1, weight=2)      # trajectory
+            cell.rowconfigure(2, weight=3)      # video (wide -> needs more height)
+            tk.Label(cell, text=f"●  #{self._num(slug)}   {self._clip_display(self.assign.get(slug))}\n"
+                                f"⮞ {self._placement_hint(tr)}",
+                     bg=color, fg="#06121f", anchor="w", justify="left",
+                     font=("Segoe UI", 11, "bold")).grid(row=0, column=0, sticky="ew")
+            tcv = tk.Canvas(cell, bg="#0c0c12", highlightthickness=0)
+            tcv.grid(row=1, column=0, sticky="nsew", padx=3, pady=2)
+            ccv = tk.Canvas(cell, bg="#0c0c12", highlightthickness=0)
+            ccv.grid(row=2, column=0, sticky="nsew", padx=3, pady=2)
             counter = tk.Label(cell, text="", bg=BG, fg=MUTED, anchor="w",
-                               font=("Segoe UI", 11))
-            counter.pack(fill="x")
+                               font=("Segoe UI", 10))
+            counter.grid(row=3, column=0, sticky="ew")
             video = TileVideo(ccv)
             cams = sorted(self.cam_mp4s.get(slug, {}).keys())
             if cams:
                 video.set_sources({c: str(p) for c, p in self.cam_mp4s[slug].items()})
                 ccv.bind("<Button-1>", lambda e, s=slug: self._cycle_cam(s))
-            else:
-                tcv_msg = "trajectory only" if not self.video_var.get() else "no video"
-                ccv.create_text(CAM_W // 2, CAM_H // 2, fill=MUTED, text=tcv_msg)
             self.cards[slug] = {"traj": tcv, "cam": ccv, "video": video,
                                 "counter": counter, "cams": cams, "ci": 0}
 
@@ -618,7 +626,17 @@ class ShowApp:
             return build_stop(), ""                            # quiet repeat
         return None, None
 
+    def _on_configure(self, _e):
+        # repaint tiles after a resize / fullscreen toggle settles (so they refit)
+        if not self.cards:
+            return
+        if self._cfg_after is not None:
+            self.root.after_cancel(self._cfg_after)
+        self._cfg_after = self.root.after(120, self._render_frame)
+
     def _render_frame(self):
+        if not self.root.winfo_exists():
+            return
         playing = self.after_id is not None
         notes = []
         for slug, d in self.cards.items():
@@ -626,9 +644,16 @@ class ShowApp:
             if tr is None:
                 continue
             self._draw_traj(d["traj"], tr)
+            ccv = d["cam"]
+            cw, ch = max(1, ccv.winfo_width()), max(1, ccv.winfo_height())
             if d["cams"]:
-                d["video"].show(d["cams"][d["ci"]], tr.idx, CAM_W, CAM_H)
-            cam_txt = f"cam {d['cams'][d['ci']]}" if d["cams"] else "no video"
+                d["video"].show(d["cams"][d["ci"]], tr.idx, cw, ch)
+                cam_txt = f"cam {d['cams'][d['ci']]}"
+            else:
+                ccv.delete("all")
+                ccv.create_text(cw // 2, ch // 2, fill=MUTED,
+                                text="trajectory only" if not self.video_var.get() else "no video")
+                cam_txt = "no video"
             geo = "  ⚠GEOFENCED" if getattr(tr, "geofenced", False) else ""
             d["counter"].config(text=f"{cam_txt}   {tr.idx}/{len(tr.frames)}{geo}")
             if getattr(tr, "geofenced", False):
@@ -643,13 +668,15 @@ class ShowApp:
 
     def _draw_traj(self, cv: tk.Canvas, tr: MouseTrack):
         cv.delete("all")
-        w = TRAJ_PX
+        W, H = max(1, cv.winfo_width()), max(1, cv.winfo_height())
+        s = min(W, H)                       # centred square, as large as fits
+        ox, oy = (W - s) / 2, (H - s) / 2
         half = CAGE_W / 2
         m = self.clearance_m
         span = CAGE_W * 1.08 or 1.0
 
         def px(x, y):
-            return (w / 2 + x / span * w, w / 2 - y / span * w)
+            return (ox + s / 2 + x / span * s, oy + s / 2 - y / span * s)
         cv.create_rectangle(*px(-half, -half), *px(half, half), outline="#8a8aa8", width=1)
         cv.create_rectangle(*px(-half + m, -half + m), *px(half - m, half - m),
                             outline=OK, dash=(4, 3))
@@ -729,6 +756,7 @@ class ShowApp:
                     self._log(f"{slug}: CSV read failed: {e}"); continue
                 if not pts:
                     continue
+                pts = T.smooth(pts, self.smooth_win)   # damp keypoint jitter
                 color = self._slug_color(slug)
                 tracks[slug] = MouseTrack(slug, self._clip_display(label), pts,
                                           (CAGE_W, CAGE_H, clearance), SRC_FPS,
@@ -762,6 +790,7 @@ class ShowApp:
         self._build_cards()
         self._goto_show()
         self.on_reset()
+        self.root.after(120, self._render_frame)   # repaint once canvas sizes settle
         n_vid = len(cam_mp4s)
         self.show_status.set(f"{len(tracks)} mouse(mice) ready, {n_vid} with video — ▶ PLAY")
 

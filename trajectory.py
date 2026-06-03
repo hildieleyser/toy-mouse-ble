@@ -138,6 +138,27 @@ def segment_speeds(points: list[tuple[float, float]], fps: float) -> list[float]
     return speeds
 
 
+def smooth(points: list[tuple[float, float]], window: int
+           ) -> list[tuple[float, float]]:
+    """Centred moving-average low-pass over (x, y) to damp keypoint jitter.
+
+    `window` is the number of frames averaged (odd is natural; 1/0 = no-op).
+    Reduces the frame-to-frame speed spikes that otherwise inflate the time-warp,
+    so playback is smoother and faster. Endpoints use a shrinking window."""
+    n = len(points)
+    if window <= 1 or n < 3:
+        return points
+    half = window // 2
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    out = []
+    for i in range(n):
+        lo, hi = max(0, i - half), min(n, i + half + 1)
+        k = hi - lo
+        out.append((sum(xs[lo:hi]) / k, sum(ys[lo:hi]) / k))
+    return out
+
+
 def choose_timewarp(speeds: list[float], v_max: float) -> float:
     """Global playback-rate divisor so the fastest segment fits under v_max.
 
