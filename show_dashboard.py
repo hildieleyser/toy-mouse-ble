@@ -549,7 +549,7 @@ class ShowApp:
         for tr in self.tracks.values():
             tr.reset()
         self.pulse_state = {s: {"dir": None, "until": 0.0, "gap_until": 0.0,
-                                "idle_sent": True} for s in self.tracks}
+                                "last_stop": 0.0} for s in self.tracks}
         self._render_frame()
 
     def on_fullscreen(self):
@@ -580,28 +580,35 @@ class ShowApp:
             return
         self.after_id = self.root.after(int(1000 * self.MASTER_DT), self._tick)
 
+    STOP_REPEAT_S = 0.1   # re-send stop this often while idle (catch dropped stops)
+
     def _resolve_pulse(self, slug, direction, byte, drive_now, now):
         """Shape each duty pulse so the toy actually latches it, and optionally rest
         between pulses. A pulse is held for at least `min_pulse_ms`; after it ends the
         toy stays stopped for at least `gap_ms` before the next pulse may start (gap
-        lets a mouse cover less ground over a longer time). Returns (payload|None,
-        label); None means 'send nothing this tick'."""
+        lets a mouse cover less ground over a longer time). While idle the stop frame
+        is RE-SENT periodically, because the toy latches its last command and writes
+        are unconfirmed — one dropped stop would otherwise leave it driving into a
+        wall. Returns (payload|None, label); None means 'send nothing this tick'."""
         st = self.pulse_state.setdefault(
-            slug, {"dir": None, "until": 0.0, "gap_until": 0.0, "idle_sent": True})
+            slug, {"dir": None, "until": 0.0, "gap_until": 0.0, "last_stop": 0.0})
         # 1) mid-pulse: keep holding until the minimum width is met
         if st["dir"] is not None and now < st["until"]:
             return build_raw(st["dir"], st["byte"]), ""        # hold; no log spam
-        # 2) a pulse just ended: stop once and open the rest/gap window
+        # 2) a pulse just ended: stop and open the rest/gap window
         if st["dir"] is not None:
             st["dir"] = None
             st["gap_until"] = now + self.gap_ms / 1000.0
-            st["idle_sent"] = True
+            st["last_stop"] = now
             return build_stop(), "stop"
-        # 3) idle: start a new pulse only if asked AND past the gap
+        # 3) idle but a new pulse is wanted and the gap has elapsed -> drive
         if drive_now and direction is not None and now >= st["gap_until"]:
-            st["dir"], st["byte"], st["until"], st["idle_sent"] = \
-                direction, byte, now + self.min_pulse_ms / 1000.0, False
+            st["dir"], st["byte"], st["until"] = direction, byte, now + self.min_pulse_ms / 1000.0
             return build_raw(direction, byte), direction
+        # 4) idle: re-affirm the stop periodically so a dropped packet can't latch
+        if now - st["last_stop"] >= self.STOP_REPEAT_S:
+            st["last_stop"] = now
+            return build_stop(), ""                            # quiet repeat
         return None, None
 
     def _render_frame(self):
@@ -740,7 +747,7 @@ class ShowApp:
         self.tracks = tracks
         self.cam_mp4s = cam_mp4s
         self.pulse_state = {s: {"dir": None, "until": 0.0, "gap_until": 0.0,
-                                "idle_sent": True} for s in tracks}
+                                "last_stop": 0.0} for s in tracks}
         self._build_cards()
         self._goto_show()
         self.on_reset()
